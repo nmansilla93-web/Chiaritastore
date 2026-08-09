@@ -27,7 +27,7 @@ def _turso_credentials():
 def get_conn():
     turso_url, turso_token = _turso_credentials()
     if turso_url and turso_token:
-        conn = libsql.connect(turso_url, auth_token=turso_token)
+        conn = libsql.connect(database=turso_url, auth_token=turso_token)
     else:
         conn = sqlite3.connect(DB_PATH)
     try:
