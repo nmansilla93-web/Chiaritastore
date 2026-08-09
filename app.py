@@ -168,6 +168,9 @@ def tab_dashboard():
     conn = get_conn()
     productos = pd.read_sql_query("SELECT * FROM productos", conn)
     ventas = pd.read_sql_query("SELECT * FROM ventas", conn)
+    costo_vendido_historico = conn.execute(
+        "SELECT COALESCE(SUM(costo_unitario * cantidad), 0) FROM venta_items"
+    ).fetchone()[0]
     conn.close()
 
     valor_stock_costo = (productos["costo"] * productos["stock"]).sum() if not productos.empty else 0
@@ -175,6 +178,7 @@ def tab_dashboard():
         ((productos["precio_venta"] - productos["costo"]) * productos["stock"]).sum()
         if not productos.empty else 0
     )
+    total_invertido = valor_stock_costo + costo_vendido_historico
 
     hoy = datetime.now().date()
     inicio_mes = hoy.replace(day=1)
@@ -184,11 +188,12 @@ def tab_dashboard():
     else:
         ventas_mes = ventas
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Productos activos", len(productos))
     col2.metric("Valor stock (costo)", formato_moneda(valor_stock_costo))
-    col3.metric("Ganancia potencial en stock", formato_moneda(ganancia_potencial))
-    col4.metric("Ventas del mes", len(ventas_mes))
+    col3.metric("Total invertido (histórico)", formato_moneda(total_invertido))
+    col4.metric("Ganancia potencial en stock", formato_moneda(ganancia_potencial))
+    col5.metric("Ventas del mes", len(ventas_mes))
 
     col5, col6 = st.columns(2)
     col5.metric("Ingresos del mes", formato_moneda(ventas_mes["total"].sum() if not ventas_mes.empty else 0))
