@@ -11,7 +11,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-La app se abre en `http://localhost:8501`. Los datos se guardan en `chiarita.db` (SQLite, no se sube al repo).
+La app se abre en `http://localhost:8501`. Sin configurar Turso, los datos se guardan en `chiarita.db` (SQLite local, no se sube al repo).
 
 ## Secciones
 
@@ -22,6 +22,17 @@ La app se abre en `http://localhost:8501`. Los datos se guardan en `chiarita.db`
 - **Garantías**: listado de comprobantes con garantía vigente y días restantes.
 - **Configuración**: nombre, teléfono, dirección del negocio y días de garantía (10 por defecto), usados en el comprobante.
 
-## Nota sobre el hosting
+## Hosting gratis para siempre: Streamlit Community Cloud + Turso
 
-Si se despliega en un servicio con almacenamiento efímero (por ejemplo Streamlit Community Cloud gratuito), la base `chiarita.db` puede reiniciarse en cada redeploy. Para producción conviene un hosting con disco persistente (Render, Railway, etc.).
+Streamlit Community Cloud aloja la app gratis sin límite de tiempo, pero borra el disco local en cada reinicio. Por eso la app usa [Turso](https://turso.tech) (SQLite en la nube, plan gratuito permanente) como base de datos cuando hay credenciales configuradas, y cae automáticamente a `chiarita.db` local si no las encuentra (para desarrollo).
+
+1. Creá una cuenta gratis en [turso.tech](https://turso.tech) y una base de datos (`turso db create chiarita` con la CLI, o desde el dashboard).
+2. Obtené la URL de conexión (`turso db show chiarita --url`, empieza con `libsql://...`) y un token (`turso db tokens create chiarita`).
+3. En Streamlit Community Cloud, andá a **Settings → Secrets** de la app y agregá:
+   ```toml
+   TURSO_DATABASE_URL = "libsql://tu-base.turso.io"
+   TURSO_AUTH_TOKEN = "tu-token"
+   ```
+4. Para probarlo en local con Turso, creá `.streamlit/secrets.toml` (ya está en `.gitignore`, no se sube) con las mismas dos claves.
+
+Sin esas dos claves configuradas, la app sigue funcionando igual pero con SQLite local (`chiarita.db`), útil para desarrollo.

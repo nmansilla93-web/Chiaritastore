@@ -1,6 +1,8 @@
 import sqlite3
+import warnings
 from datetime import datetime, timedelta
 
+import libsql
 import pandas as pd
 import streamlit as st
 from fpdf import FPDF
@@ -10,10 +12,28 @@ MEDIOS_PAGO = ["Efectivo", "Transferencia", "Tarjeta de débito", "Tarjeta de cr
 
 st.set_page_config(page_title="Chiarita Store - Stock y Finanzas", layout="wide", page_icon="🧺")
 
+warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy")
+
+
+def _turso_credentials():
+    try:
+        url = st.secrets.get("TURSO_DATABASE_URL")
+        token = st.secrets.get("TURSO_AUTH_TOKEN")
+    except Exception:
+        return None, None
+    return url, token
+
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA foreign_keys = ON")
+    turso_url, turso_token = _turso_credentials()
+    if turso_url and turso_token:
+        conn = libsql.connect(turso_url, auth_token=turso_token)
+    else:
+        conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+    except Exception:
+        pass
     return conn
 
 
