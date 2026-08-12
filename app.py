@@ -109,6 +109,8 @@ def init_db():
         c.execute("ALTER TABLE ventas ADD COLUMN saldo_pendiente REAL NOT NULL DEFAULT 0")
     if "estado_pago" not in columnas_ventas:
         c.execute("ALTER TABLE ventas ADD COLUMN estado_pago TEXT NOT NULL DEFAULT 'Pagado'")
+    if "nota" not in columnas_ventas:
+        c.execute("ALTER TABLE ventas ADD COLUMN nota TEXT")
 
     c.execute("SELECT COUNT(*) FROM config")
     if c.fetchone()[0] == 0:
@@ -504,10 +506,11 @@ def tab_historial():
         estado_pago_txt = venta.estado_pago
         if venta.saldo_pendiente > 0:
             estado_pago_txt += f" (debe {formato_moneda(venta.saldo_pendiente)})"
-        with st.expander(
+        titulo_expander = (
             f"N.° {venta.numero_comprobante} · {venta.fecha} · {venta.cliente_nombre} · "
             f"{formato_moneda(venta.total)} · {estado} · {estado_pago_txt}"
-        ):
+        ).replace("$", "\\$")
+        with st.expander(titulo_expander):
             items = pd.read_sql_query(
                 "SELECT nombre_producto, cantidad, precio_unitario, subtotal, ganancia FROM venta_items "
                 "WHERE venta_id = ?", conn, params=(venta.id,),
@@ -520,8 +523,11 @@ def tab_historial():
             st.write(f"Medio de pago: {venta.medio_pago}")
             st.write(f"Ganancia de la venta: {formato_moneda(venta.ganancia_total)}")
             st.write(f"Garantía válida hasta: {venta.garantia_hasta}")
-            st.write(f"Estado de pago: {venta.estado_pago} · Pagado: {formato_moneda(venta.monto_pagado)} "
-                     f"· Saldo pendiente: {formato_moneda(venta.saldo_pendiente)}")
+            st.write(f"Estado de pago: {venta.estado_pago}")
+            st.write(f"Pagado: {formato_moneda(venta.monto_pagado)}")
+            st.write(f"Saldo pendiente: {formato_moneda(venta.saldo_pendiente)}")
+            if venta.nota:
+                st.write(f"Nota: {venta.nota}")
 
             venta_dict = {
                 "numero_comprobante": venta.numero_comprobante,
@@ -542,6 +548,77 @@ def tab_historial():
                 mime="application/pdf",
                 key=f"pdf_{venta.id}",
             )
+
+            if venta.saldo_pendiente > 0:
+                if st.button("✅ Marcar como pagado", key=f"marcar_pagado_{venta.id}"):
+                    diferencia = round(venta.total - venta.monto_pagado, 2)
+                    conn_edit = get_conn()
+                    if diferencia > 0:
+                        conn_edit.execute(
+                            "INSERT INTO pagos (venta_id, fecha, monto, medio_pago, nota) VALUES (?, ?, ?, ?, ?)",
+                            (venta.id, ahora().strftime("%Y-%m-%d %H:%M"), diferencia, venta.medio_pago,
+                             "Cobro posterior (marcado como pagado)"),
+                        )
+                    conn_edit.execute(
+                        "UPDATE ventas SET monto_pagado = total, saldo_pendiente = 0, estado_pago = 'Pagado' "
+                        "WHERE id = ?",
+                        (venta.id,),
+                    )
+                    conn_edit.commit()
+                    conn_edit.close()
+                    st.success("Venta marcada como pagada.")
+                    st.rerun()
+
+            if st.checkbox("✏️ Editar venta", key=f"toggle_editar_{venta.id}"):
+                with st.form(f"form_editar_venta_{venta.id}"):
+                    edit_cliente_nombre = st.text_input(
+                        "Nombre del cliente", value=venta.cliente_nombre, key=f"edit_nombre_{venta.id}",
+                    )
+                    edit_cliente_telefono = st.text_input(
+                        "Teléfono", value=venta.cliente_telefono or "", key=f"edit_tel_{venta.id}",
+                    )
+                    medio_idx = MEDIOS_PAGO.index(venta.medio_pago) if venta.medio_pago in MEDIOS_PAGO else 0
+                    edit_medio_pago = st.selectbox(
+                        "Medio de pago", MEDIOS_PAGO, index=medio_idx, key=f"edit_medio_{venta.id}",
+                    )
+                    edit_monto_pagado = st.number_input(
+                        "Monto pagado", min_value=0.0, max_value=float(venta.total),
+                        value=float(venta.monto_pagado), step=0.01, key=f"edit_pagado_{venta.id}",
+                    )
+                    edit_nota = st.text_area(
+                        "Nota / observación (opcional)", value=venta.nota or "", key=f"edit_nota_{venta.id}",
+                    )
+                    if st.form_submit_button("Guardar cambios"):
+                        if not edit_cliente_nombre:
+                            st.error("El nombre del cliente es obligatorio.")
+                        else:
+                            nuevo_saldo = round(venta.total - edit_monto_pagado, 2)
+                            if edit_monto_pagado <= 0:
+                                nuevo_estado = "Pendiente"
+                            elif edit_monto_pagado >= venta.total:
+                                nuevo_estado = "Pagado"
+                            else:
+                                nuevo_estado = "Parcial"
+
+                            conn_edit = get_conn()
+                            diferencia = round(edit_monto_pagado - venta.monto_pagado, 2)
+                            if diferencia > 0:
+                                conn_edit.execute(
+                                    "INSERT INTO pagos (venta_id, fecha, monto, medio_pago, nota) "
+                                    "VALUES (?, ?, ?, ?, ?)",
+                                    (venta.id, ahora().strftime("%Y-%m-%d %H:%M"), diferencia, edit_medio_pago,
+                                     edit_nota or "Cobro posterior"),
+                                )
+                            conn_edit.execute(
+                                "UPDATE ventas SET cliente_nombre=?, cliente_telefono=?, medio_pago=?, "
+                                "monto_pagado=?, saldo_pendiente=?, estado_pago=?, nota=? WHERE id=?",
+                                (edit_cliente_nombre, edit_cliente_telefono, edit_medio_pago, edit_monto_pagado,
+                                 nuevo_saldo, nuevo_estado, edit_nota, venta.id),
+                            )
+                            conn_edit.commit()
+                            conn_edit.close()
+                            st.success("Venta actualizada.")
+                            st.rerun()
     conn.close()
 
 
