@@ -1,18 +1,31 @@
 import sqlite3
 import warnings
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import libsql
 import pandas as pd
 import streamlit as st
 from fpdf import FPDF
 
+try:
+    from zoneinfo import ZoneInfo
+    TZ_ARGENTINA = ZoneInfo("America/Argentina/Buenos_Aires")
+except Exception:
+    TZ_ARGENTINA = timezone(timedelta(hours=-3))
+
 DB_PATH = "chiarita.db"
-MEDIOS_PAGO = ["Efectivo", "Transferencia", "Tarjeta de débito", "Tarjeta de crédito", "Otro"]
+MEDIOS_PAGO = [
+    "Efectivo", "Transferencia", "Tarjeta de débito", "Tarjeta de crédito",
+    "Fiado / Cuenta corriente", "Otro",
+]
 
 st.set_page_config(page_title="Chiarita Store - Stock y Finanzas", layout="wide", page_icon="🧺")
 
 warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy")
+
+
+def ahora():
+    return datetime.now(TZ_ARGENTINA).replace(tzinfo=None)
 
 
 def _turso_credentials():
@@ -79,6 +92,24 @@ def init_db():
         subtotal REAL NOT NULL,
         ganancia REAL NOT NULL
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS pagos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        venta_id INTEGER NOT NULL REFERENCES ventas(id),
+        fecha TEXT NOT NULL,
+        monto REAL NOT NULL,
+        medio_pago TEXT,
+        nota TEXT
+    )""")
+
+    columnas_ventas = {row[1] for row in c.execute("PRAGMA table_info(ventas)").fetchall()}
+    if "monto_pagado" not in columnas_ventas:
+        c.execute("ALTER TABLE ventas ADD COLUMN monto_pagado REAL NOT NULL DEFAULT 0")
+        c.execute("UPDATE ventas SET monto_pagado = total")
+    if "saldo_pendiente" not in columnas_ventas:
+        c.execute("ALTER TABLE ventas ADD COLUMN saldo_pendiente REAL NOT NULL DEFAULT 0")
+    if "estado_pago" not in columnas_ventas:
+        c.execute("ALTER TABLE ventas ADD COLUMN estado_pago TEXT NOT NULL DEFAULT 'Pagado'")
+
     c.execute("SELECT COUNT(*) FROM config")
     if c.fetchone()[0] == 0:
         c.execute(
@@ -152,6 +183,12 @@ def generar_pdf_comprobante(venta, items, config):
     pdf.ln(2)
     pdf.cell(0, 7, f"TOTAL: {formato_moneda(venta['total'])}", ln=True, align="R")
 
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, f"Pagado: {formato_moneda(venta.get('monto_pagado', venta['total']))}", ln=True, align="R")
+    if venta.get("saldo_pendiente", 0) > 0:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(0, 6, f"Saldo pendiente: {formato_moneda(venta['saldo_pendiente'])}", ln=True, align="R")
+
     pdf.ln(6)
     pdf.set_font("Helvetica", "I", 8)
     pdf.multi_cell(
@@ -171,6 +208,7 @@ def tab_dashboard():
     costo_vendido_historico = conn.execute(
         "SELECT COALESCE(SUM(costo_unitario * cantidad), 0) FROM venta_items"
     ).fetchone()[0]
+    por_cobrar = conn.execute("SELECT COALESCE(SUM(saldo_pendiente), 0) FROM ventas").fetchone()[0]
     conn.close()
 
     valor_stock_costo = (productos["costo"] * productos["stock"]).sum() if not productos.empty else 0
@@ -180,7 +218,7 @@ def tab_dashboard():
     )
     total_invertido = valor_stock_costo + costo_vendido_historico
 
-    hoy = datetime.now().date()
+    hoy = ahora().date()
     inicio_mes = hoy.replace(day=1)
     if not ventas.empty:
         ventas["fecha_dt"] = pd.to_datetime(ventas["fecha"]).dt.date
@@ -195,9 +233,10 @@ def tab_dashboard():
     col4.metric("Ganancia potencial en stock", formato_moneda(ganancia_potencial))
     col5.metric("Ventas del mes", len(ventas_mes))
 
-    col5, col6 = st.columns(2)
+    col5, col6, col7 = st.columns(3)
     col5.metric("Ingresos del mes", formato_moneda(ventas_mes["total"].sum() if not ventas_mes.empty else 0))
     col6.metric("Ganancia del mes", formato_moneda(ventas_mes["ganancia_total"].sum() if not ventas_mes.empty else 0))
+    col7.metric("Por cobrar", formato_moneda(por_cobrar))
 
     bajo_stock = productos[productos["stock"] <= productos["stock_minimo"]] if not productos.empty else productos
     if not bajo_stock.empty:
@@ -361,23 +400,35 @@ def tab_nueva_venta():
             cliente_nombre = st.text_input("Nombre del cliente *")
             cliente_telefono = st.text_input("Teléfono del cliente (opcional)")
             medio_pago = st.selectbox("Medio de pago", MEDIOS_PAGO)
+            monto_pagado = st.number_input(
+                "Monto pagado ahora", min_value=0.0, max_value=float(total), value=float(total), step=0.01,
+            )
             confirmar = st.form_submit_button("Confirmar venta y generar comprobante")
 
             if confirmar:
                 if not cliente_nombre:
                     st.error("El nombre del cliente es obligatorio.")
                 else:
+                    saldo_pendiente = round(total - monto_pagado, 2)
+                    if monto_pagado <= 0:
+                        estado_pago = "Pendiente"
+                    elif monto_pagado >= total:
+                        estado_pago = "Pagado"
+                    else:
+                        estado_pago = "Parcial"
+
                     conn = get_conn()
                     config = get_config()
                     numero_comprobante = siguiente_numero_comprobante(conn)
-                    fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
-                    garantia_hasta = (datetime.now() + timedelta(days=config["dias_garantia"])).strftime("%d/%m/%Y")
+                    fecha = ahora().strftime("%Y-%m-%d %H:%M")
+                    garantia_hasta = (ahora() + timedelta(days=config["dias_garantia"])).strftime("%d/%m/%Y")
 
                     cur = conn.execute(
                         "INSERT INTO ventas (numero_comprobante, fecha, cliente_nombre, cliente_telefono, "
-                        "medio_pago, total, ganancia_total, garantia_hasta) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        "medio_pago, total, ganancia_total, garantia_hasta, monto_pagado, saldo_pendiente, "
+                        "estado_pago) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (numero_comprobante, fecha, cliente_nombre, cliente_telefono, medio_pago,
-                         total, ganancia_total, garantia_hasta),
+                         total, ganancia_total, garantia_hasta, monto_pagado, saldo_pendiente, estado_pago),
                     )
                     venta_id = cur.lastrowid
 
@@ -392,6 +443,12 @@ def tab_nueva_venta():
                             "UPDATE productos SET stock = stock - ? WHERE id = ?",
                             (item["cantidad"], item["producto_id"]),
                         )
+
+                    if monto_pagado > 0:
+                        conn.execute(
+                            "INSERT INTO pagos (venta_id, fecha, monto, medio_pago, nota) VALUES (?, ?, ?, ?, ?)",
+                            (venta_id, fecha, monto_pagado, medio_pago, "Pago al momento de la venta"),
+                        )
                     conn.commit()
 
                     venta = {
@@ -402,6 +459,8 @@ def tab_nueva_venta():
                         "medio_pago": medio_pago,
                         "total": total,
                         "garantia_hasta": garantia_hasta,
+                        "monto_pagado": monto_pagado,
+                        "saldo_pendiente": saldo_pendiente,
                     }
                     pdf_bytes = generar_pdf_comprobante(venta, st.session_state.carrito, config)
                     conn.close()
@@ -432,7 +491,7 @@ def tab_historial():
         conn.close()
         return
 
-    hoy = datetime.now().date()
+    hoy = ahora().date()
     ventas["vigente"] = pd.to_datetime(ventas["garantia_hasta"], format="%d/%m/%Y").dt.date >= hoy
 
     filtro_cliente = st.text_input("Buscar por cliente")
@@ -442,9 +501,12 @@ def tab_historial():
 
     for venta in filtradas.itertuples():
         estado = "🟢 Garantía vigente" if venta.vigente else "⚪ Garantía vencida"
+        estado_pago_txt = venta.estado_pago
+        if venta.saldo_pendiente > 0:
+            estado_pago_txt += f" (debe {formato_moneda(venta.saldo_pendiente)})"
         with st.expander(
             f"N.° {venta.numero_comprobante} · {venta.fecha} · {venta.cliente_nombre} · "
-            f"{formato_moneda(venta.total)} · {estado}"
+            f"{formato_moneda(venta.total)} · {estado} · {estado_pago_txt}"
         ):
             items = pd.read_sql_query(
                 "SELECT nombre_producto, cantidad, precio_unitario, subtotal, ganancia FROM venta_items "
@@ -458,6 +520,8 @@ def tab_historial():
             st.write(f"Medio de pago: {venta.medio_pago}")
             st.write(f"Ganancia de la venta: {formato_moneda(venta.ganancia_total)}")
             st.write(f"Garantía válida hasta: {venta.garantia_hasta}")
+            st.write(f"Estado de pago: {venta.estado_pago} · Pagado: {formato_moneda(venta.monto_pagado)} "
+                     f"· Saldo pendiente: {formato_moneda(venta.saldo_pendiente)}")
 
             venta_dict = {
                 "numero_comprobante": venta.numero_comprobante,
@@ -467,6 +531,8 @@ def tab_historial():
                 "medio_pago": venta.medio_pago,
                 "total": venta.total,
                 "garantia_hasta": venta.garantia_hasta,
+                "monto_pagado": venta.monto_pagado,
+                "saldo_pendiente": venta.saldo_pendiente,
             }
             pdf_bytes = generar_pdf_comprobante(venta_dict, items.to_dict("records"), config)
             st.download_button(
@@ -489,7 +555,7 @@ def tab_garantias():
         st.info("Todavía no hay ventas registradas.")
         return
 
-    hoy = datetime.now().date()
+    hoy = ahora().date()
     ventas["garantia_hasta_dt"] = pd.to_datetime(ventas["garantia_hasta"], format="%d/%m/%Y").dt.date
     vigentes = ventas[ventas["garantia_hasta_dt"] >= hoy].copy()
 
@@ -509,6 +575,62 @@ def tab_garantias():
         }),
         hide_index=True, use_container_width=True,
     )
+
+
+def tab_cuentas():
+    st.subheader("Cuentas y deudas")
+    conn = get_conn()
+    ventas = pd.read_sql_query(
+        "SELECT * FROM ventas WHERE saldo_pendiente > 0 ORDER BY fecha", conn,
+    )
+    conn.close()
+
+    if ventas.empty:
+        st.success("No hay saldos pendientes. Todo cobrado ✅")
+        return
+
+    st.metric("Total adeudado por clientes", formato_moneda(ventas["saldo_pendiente"].sum()))
+
+    filtro_cliente = st.text_input("Buscar por cliente", key="filtro_cuentas")
+    filtradas = ventas
+    if filtro_cliente:
+        filtradas = ventas[ventas["cliente_nombre"].str.contains(filtro_cliente, case=False, na=False)]
+
+    for venta in filtradas.itertuples():
+        with st.expander(
+            f"N.° {venta.numero_comprobante} · {venta.cliente_nombre} · {venta.fecha} · "
+            f"Debe {formato_moneda(venta.saldo_pendiente)} · {venta.estado_pago}"
+        ):
+            st.write(f"Teléfono: {venta.cliente_telefono or '-'}")
+            st.write(f"Total de la venta: {formato_moneda(venta.total)}")
+            st.write(f"Pagado hasta ahora: {formato_moneda(venta.monto_pagado)}")
+            st.write(f"Saldo pendiente: {formato_moneda(venta.saldo_pendiente)}")
+
+            with st.form(f"form_cobro_{venta.id}"):
+                monto_cobro = st.number_input(
+                    "Monto a cobrar", min_value=0.01, max_value=float(venta.saldo_pendiente),
+                    value=float(venta.saldo_pendiente), step=0.01, key=f"monto_cobro_{venta.id}",
+                )
+                medio_pago_cobro = st.selectbox("Medio de pago", MEDIOS_PAGO, key=f"medio_cobro_{venta.id}")
+                nota_cobro = st.text_input("Nota (opcional)", key=f"nota_cobro_{venta.id}")
+                if st.form_submit_button("Registrar cobro"):
+                    conn = get_conn()
+                    fecha_cobro = ahora().strftime("%Y-%m-%d %H:%M")
+                    conn.execute(
+                        "INSERT INTO pagos (venta_id, fecha, monto, medio_pago, nota) VALUES (?, ?, ?, ?, ?)",
+                        (venta.id, fecha_cobro, monto_cobro, medio_pago_cobro, nota_cobro),
+                    )
+                    nuevo_pagado = round(venta.monto_pagado + monto_cobro, 2)
+                    nuevo_saldo = round(max(venta.total - nuevo_pagado, 0), 2)
+                    nuevo_estado = "Pagado" if nuevo_saldo <= 0 else "Parcial"
+                    conn.execute(
+                        "UPDATE ventas SET monto_pagado = ?, saldo_pendiente = ?, estado_pago = ? WHERE id = ?",
+                        (nuevo_pagado, nuevo_saldo, nuevo_estado, venta.id),
+                    )
+                    conn.commit()
+                    conn.close()
+                    st.success("Cobro registrado.")
+                    st.rerun()
 
 
 def tab_configuracion():
@@ -535,7 +657,10 @@ init_db()
 st.title("🧺 Chiarita Store")
 st.caption("Control de stock, ventas, ganancias y garantías")
 
-tabs = st.tabs(["📊 Dashboard", "📦 Stock", "🧾 Nueva venta", "📜 Historial", "🛡️ Garantías", "⚙️ Configuración"])
+tabs = st.tabs([
+    "📊 Dashboard", "📦 Stock", "🧾 Nueva venta", "📜 Historial", "🛡️ Garantías",
+    "💰 Cuentas / Deudas", "⚙️ Configuración",
+])
 with tabs[0]:
     tab_dashboard()
 with tabs[1]:
@@ -547,4 +672,6 @@ with tabs[3]:
 with tabs[4]:
     tab_garantias()
 with tabs[5]:
+    tab_cuentas()
+with tabs[6]:
     tab_configuracion()
