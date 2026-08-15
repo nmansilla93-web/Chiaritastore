@@ -398,12 +398,15 @@ def tab_nueva_venta():
         colt.metric("Total", formato_moneda(total))
         colg.metric("Ganancia estimada", formato_moneda(ganancia_total))
 
+        medio_pago = st.selectbox("Medio de pago", MEDIOS_PAGO, key="medio_pago_venta")
+        pago_default = 0.0 if medio_pago == "Fiado / Cuenta corriente" else float(total)
+
         with st.form("form_confirmar_venta"):
             cliente_nombre = st.text_input("Nombre del cliente *")
             cliente_telefono = st.text_input("Teléfono del cliente (opcional)")
-            medio_pago = st.selectbox("Medio de pago", MEDIOS_PAGO)
             monto_pagado = st.number_input(
-                "Monto pagado ahora", min_value=0.0, max_value=float(total), value=float(total), step=0.01,
+                "Monto pagado ahora", min_value=0.0, max_value=float(total), value=pago_default, step=0.01,
+                key=f"monto_pagado_venta_{medio_pago}",
             )
             confirmar = st.form_submit_button("Confirmar venta y generar comprobante")
 
